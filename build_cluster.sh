@@ -44,7 +44,6 @@ if [[ $DO_ALL || $DO_IMAGES ]]; then
 	docker build -t ${DOCKER_REGISTERY}/${FRONTEND}:latest . || err "Error creating haproxy image"
 	popd
 
-	docker image prune -f
 	docker images
 fi
 
@@ -171,5 +170,4 @@ if [[ $DO_CLEAN ]]; then
 	log "Cleaning images"
 	docker rmi ${DOCKER_REGISTERY}/${BACKEND}:latest
 	docker rmi ${DOCKER_REGISTERY}/${FRONTEND}:latest
-	docker image prune -f
 fi
