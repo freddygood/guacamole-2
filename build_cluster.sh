@@ -2,7 +2,8 @@
 
 function log() {
 	local M=$1
-	echo $(date +"%H:%M:%S %d/%m/%Y") $M
+#	echo $(date +"%H:%M:%S %d/%m/%Y") $M
+	echo "$M"
 }
 
 function err() {
@@ -12,91 +13,163 @@ function err() {
 }
 
 
-NODES='node1 node2'
-SWARM_MASTER='node1'
-STACK_NAME='exness'
+NODES=2
 BACKEND='nginx'
 FRONTEND='haproxy'
-STATS_SLEEP=60
+NETWORK='exness'
+PORT='8088'
+STATS_SLEEP=5
 DOCKER_REGISTERY='freddygood'
-#export VIRTUALBOX_BOOT2DOCKER_URL='https://github.com/boot2docker/boot2docker/releases/download/v17.12.0-ce/boot2docker.iso'
 
 while [ "$1" ]; do
-	case "$1" in 
-		'--all')      ALL=true ;;
-		'--machines') MACHINES=true ;;
-		'--images')   IMAGES=true ;;
-		'--stack')    STACK=true ;;
-		'--stats')    STATS=true ;;
+	case "$1" in
+		'--force')    DO_FORCE=true ;;
+		'--all')      DO_ALL=true ;;
+		'--images')   DO_IMAGES=true ;;
+		'--network')  DO_NETWORK=true ;;
+		'--backend')  DO_BACKEND=true ;;
+		'--frontend') DO_FRONTEND=true ;;
+		'--stats')    DO_STATS=true ;;
+		'--clean')    DO_CLEAN=true ;;
 	esac
 	shift
 done
 
 # create images
-if [[ $ALL || $IMAGES ]]; then
-	eval $(docker-machine env --unset)
-	pushd haproxy
-	docker build -t ${DOCKER_REGISTERY}/haproxy:latest . || err "Error creating haproxy image"
-	popd
+if [[ $DO_ALL || $DO_IMAGES ]]; then
 	pushd nginx
-	docker build -t ${DOCKER_REGISTERY}/nginx:latest . || err "Error creating nginx image"
+	docker build -t ${DOCKER_REGISTERY}/${BACKEND}:latest . || err "Error creating nginx image"
+	popd
+	pushd haproxy
+	docker build -t ${DOCKER_REGISTERY}/${FRONTEND}:latest . || err "Error creating haproxy image"
 	popd
 
 	docker image prune -f
-
-	docker login
-	docker push ${DOCKER_REGISTERY}/haproxy:latest
-	docker push ${DOCKER_REGISTERY}/nginx:latest
-
 	docker images
 fi
 
-# create machines
-if [[ $ALL || $MACHINES ]]; then
-	eval $(docker-machine env --unset)
-	for NODE in $NODES; do
-		docker-machine inspect $NODE >/dev/null 2>&1 && docker-machine rm -f $NODE
-	done
-
-	for NODE in $NODES; do
-		docker-machine create --driver virtualbox $NODE
-	done
-
-	eval $(docker-machine env $SWARM_MASTER)
-	SWARM_MASTER_IP=$(docker-machine ip $SWARM_MASTER)
-	docker swarm init --advertise-addr $SWARM_MASTER_IP
-
-	TOKEN=$(docker swarm join-token -q worker)
-	SWARM_ADD_COMMAND="docker swarm join --token ${TOKEN} ${SWARM_MASTER_IP}:2377"
-
-	for NODE in $NODES; do
-		[ $NODE != $SWARM_MASTER ] && docker-machine ssh $NODE $SWARM_ADD_COMMAND
-	done
-
-	log "IP of Docker Swarm master ${SWARM_MASTER} is $SWARM_MASTER_IP"
-	docker node ls
-	eval $(docker-machine env --unset)
-	echo "Run eval \$(docker-machine env $SWARM_MASTER) to setup env"
+# create network
+if [[ $DO_ALL || $DO_NETWORK ]]; then
+	[ $DO_FORCE ] && docker network rm $NETWORK
+	docker network create $NETWORK
+	docker network inspect $NETWORK
 fi
 
-# create registry container
-if [[ $ALL || $STACK ]]; then
-	eval $(docker-machine env $SWARM_MASTER)
-	docker stack deploy --compose-file docker-compose.yml $STACK_NAME
-	docker stack services $STACK_NAME
-	eval $(docker-machine env --unset)
+# create backend containers
+if [[ $DO_ALL || $DO_BACKEND ]]; then
+	mkdir -p runtime/nginx-confd runtime/nginx-static
+	cp nginx/backend.conf runtime/nginx-confd/
+	rsync -a --delete nginx/static/ runtime/nginx-static/
+	for N in $(seq 1 $NODES); do
+		NODE="${BACKEND}${N}"
+		IMAGE="${DOCKER_REGISTERY}/${BACKEND}:latest"
+		[ $DO_FORCE ] && docker rm -f $NODE >/dev/null
+		docker run -d \
+			--network $NETWORK \
+			--name $NODE \
+			--volume $(pwd)/runtime/nginx-confd:/etc/nginx/conf.d \
+			--volume $(pwd)/runtime/nginx-logs-$N:/var/log/nginx \
+			--volume $(pwd)/runtime/nginx-static:/www/static \
+			$IMAGE >/dev/null
+		NODE_ID=$(docker inspect --format='{{.Id}}' $NODE)
+		NODE_IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $NODE)
+		log "Created container '$NODE'"
+		log " - ID '$NODE_ID'"
+		log " - IP address '$NODE_IP'"
+	done
+fi
 
-	echo "Cluster entry points:"
-	for NODE in $NODES; do
-		IP=$(docker-machine ip $NODE)
-		echo "http://${IP}/index.html"
+# create frontend containers
+if [[ $DO_ALL || $DO_FRONTEND ]]; then
+	mkdir -p runtime/haproxy-confd
+	cp haproxy/haproxy.cfg runtime/haproxy-confd/
+	for N in $(seq 1 $NODES); do
+		NODE="${FRONTEND}${N}"
+		IMAGE="${DOCKER_REGISTERY}/${FRONTEND}:latest"
+		let NODE_PORT=PORT+N-1
+		[ $DO_FORCE ] && docker rm -f $NODE >/dev/null
+		docker run -d \
+			--network $NETWORK \
+			--name $NODE \
+			--volume $(pwd)/runtime/haproxy-confd:/etc/haproxy \
+			--volume $(pwd)/runtime/haproxy-logs-$N:/var/log \
+			--publish ${NODE_PORT}:80 \
+			$IMAGE >/dev/null
+		NODE_ID=$(docker inspect --format='{{.Id}}' $NODE)
+		NODE_IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $NODE)
+		log "Created container '$NODE'"
+		log " - ID '$NODE_ID'"
+		log " - IP address '$NODE_IP'"
 	done
 fi
 
 # show statistics
-if [[ $ALL || $STATS ]]; then
-	[ $ALL ] && sleep $STATS_SLEEP
-	SWARM_MASTER_IP=$(docker-machine ip $SWARM_MASTER)
-	echo "Backend statistics:"
-	curl -s "http://${SWARM_MASTER_IP}/haproxy?stats;csv" | grep ^${BACKEND} | grep 'UP' | awk -F, '{print $2, $18}'
+if [[ $DO_ALL || $DO_STATS ]]; then
+	[ $DO_ALL ] && sleep $STATS_SLEEP
+
+	echo
+	log "Cluster information:"
+	for N in $(seq 1 $NODES); do
+		NODE="${FRONTEND}${N}"
+		docker inspect $NODE >/dev/null 2>&1 || continue
+		let NODE_PORT=PORT+N-1
+		log " - Container '$NODE' entry point:"
+		log "   - http://127.0.0.1:${NODE_PORT}/index.html"
+		log " - Backend aliveness:"
+		curl -s "http://127.0.0.1:${NODE_PORT}/haproxy?stats;csv" | grep ^${BACKEND} | grep -v ^${BACKEND}.BACKEND | grep 'UP' | awk -F, '{printf "%s: %s\n", $2, $18}' | while read M; do
+			log "   - $M"
+		done
+	done
+
+	echo
+	log "Frontend working containers:"
+	for N in $(seq 1 $NODES); do
+		NODE="${FRONTEND}${N}"
+		docker inspect $NODE >/dev/null 2>&1 || continue
+		let NODE_PORT=PORT+N-1
+		NODE_ID=$(docker inspect --format='{{.Id}}' $NODE)
+		NODE_IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $NODE)
+		log " - Container '$NODE'"
+		log "   - ID '$NODE_ID'"
+		log "   - IP address '$NODE_IP'"
+		log "   - Exposed port '$NODE_PORT'"
+	done
+
+	echo
+	log "Backend working containers:"
+	for N in $(seq 1 $NODES); do
+		NODE="${BACKEND}${N}"
+		docker inspect $NODE >/dev/null 2>&1 || continue
+		NODE_ID=$(docker inspect --format='{{.Id}}' $NODE)
+		NODE_IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $NODE)
+		log " - Container '$NODE'"
+		log "   - ID '$NODE_ID'"
+		log "   - IP address '$NODE_IP'"
+	done
+fi
+
+# clean
+if [[ $DO_CLEAN ]]; then
+	log "Cleaning frontend"
+	for N in $(seq 1 $NODES); do
+		NODE="${FRONTEND}${N}"
+		log " - $NODE"
+		docker rm -f $NODE >/dev/null
+	done
+
+	log "Cleaning backend"
+	for N in $(seq 1 $NODES); do
+		NODE="${BACKEND}${N}"
+		log " - $NODE"
+		docker rm -f $NODE >/dev/null
+	done
+
+	log "Cleaning network"
+	log " - $NETWORK"
+	docker network rm $NETWORK >/dev/null
+
+	log "Cleaning images"
+	docker rmi ${DOCKER_REGISTERY}/${BACKEND}:latest
+	docker rmi ${DOCKER_REGISTERY}/${FRONTEND}:latest
+	docker image prune -f
 fi

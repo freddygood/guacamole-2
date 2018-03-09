@@ -6,22 +6,40 @@
 
 Creates images of haproxy and nginx containers
 
-You should replace variable $DOCKER_REGISTERY with a name of your docker hub account if you're planning re-create images
+### Creating network
 
-### Creating docker machines
+`./build_cluster.sh --network [--force]`
 
-`./build_cluster.sh --machines`
+Creates network for container deployment (re-creates if --force used)
 
-Creates local docker machines with driver virtualbox. Assumed that VirtualBox is installed.
+### Creating backend containers
 
-### Creating docker swarm stack
+`./build_cluster.sh --backend [--force]`
 
-`./build_cluster.sh --stack`
+Creates 2 docker containers with nginx (re-creates if --force used)
 
-Creates docker swarm stack.
+### Creating frontend containers
+
+`./build_cluster.sh --frontend [--force]`
+
+Creates 2 haproxy containers with nginx (re-creates if --force used)
 
 ### Displaying cluster statistics
 
-Shows cluster statistics such as entrypoints and backend aliveness
-
 `./build_cluster.sh --stats`
+
+Shows cluster entrypoints and backend aliveness, and backend and frontend information as well
+
+### Running in batch
+
+`./build_cluster.sh --all [--force]`
+
+Alias of `./build_cluster.sh --images --network --backend --frontend --stats [--force]`
+
+### Cleaning cluster
+
+`./build_cluster.sh --clean`
+
+Deletes all containers, network and images
+
+### Please enjoy!

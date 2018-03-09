@@ -16,9 +16,7 @@ RUN \
   apt-get install -y nginx && \
   rm -rf /var/lib/apt/lists/* && \
   echo "\ndaemon off;" >> /etc/nginx/nginx.conf
-ADD *.conf /etc/nginx/conf.d/
 RUN mkdir -p /www/static
-ADD static/* /www/static/
 
 # Define mountable directories.
 VOLUME ["/var/log/nginx", "/etc/nginx/conf.d", "/www/static"]
